@@ -16,6 +16,11 @@ except ImportError:
     FlowMatchEulerDiscreteScheduler = None
     DEISMultistepScheduler = None
 
+try:
+    from .iching_wuxing_scheduler_core import IChingWuxingScheduler
+except ImportError:
+    IChingWuxingScheduler = None
+
 scheduler_list = [
     "unipc", "unipc/beta",
     "dpm++", "dpm++/beta",
@@ -32,6 +37,14 @@ scheduler_list = [
     "sa_ode_stable",
     "rcm",
     "vibt_unipc",
+    "iching/wuxing",
+    "iching/wuxing-strong",
+    "iching/wuxing-stable",
+    "iching/wuxing-smooth",
+    "iching/wuxing-clean",
+    "iching/wuxing-sharp",
+    "iching/wuxing-lowstep",
+    "rcm"
 ]
 
 def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None, log_timesteps=False, **kwargs):
@@ -125,6 +138,11 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     elif "sa_ode_stable" in scheduler:
         sample_scheduler = FlowMatchSAODEStableScheduler(shift=shift, **kwargs)
         sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)
+    elif scheduler.startswith('iching/'):
+        if IChingWuxingScheduler is None:
+            raise ImportError("IChingWuxingScheduler is not available. The compiled module may be missing.")
+        sample_scheduler = IChingWuxingScheduler(mode=scheduler)
+        sample_scheduler.set_timesteps(steps, device=device)
     elif 'rcm' in scheduler:
         sample_scheduler = rCMFlowMatchScheduler()
         sample_scheduler.set_timesteps(steps, sigma_max=120)
