@@ -2190,6 +2190,8 @@ class WanVideoDecode:
                     "tile_y": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "tooltip": "Tile height in pixels. Smaller values use less VRAM but will make seams more obvious."}),
                     "tile_stride_x": ("INT", {"default": 144, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride width in pixels. Smaller values use less VRAM but will introduce more seams."}),
                     "tile_stride_y": ("INT", {"default": 128, "min": 32, "max": 2040, "step": 8, "tooltip": "Tile stride height in pixels. Smaller values use less VRAM but will introduce more seams."}),
+                    "zca_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                      "tooltip": "Alpha value for ZCA whitening/coloring transform between first latent and others. 0.0 disables ZCA."}),
                     },
                     "optional": {
                         "normalization": (["default", "minmax"], {"advanced": True}),
@@ -2209,7 +2211,7 @@ class WanVideoDecode:
     FUNCTION = "decode"
     CATEGORY = "WanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
+    def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default", zca_alpha=0.2):
         mm.soft_empty_cache()
         video = samples.get("video", None)
         if video is not None:
@@ -2226,7 +2228,18 @@ class WanVideoDecode:
 
         vae.to(device)
 
+        # Apply ZCA-based Whitening and Coloring Transform between first latent and others
+        base_latent = latents[:, :, 0:1].squeeze(0)  # [C, 1, H, W]
+        other_latent = latents[:, :, 1:].squeeze(0)  # [C, T-2, H, W]
+        other_latent_list = [self.__zca_whiten_and_color(other_latent[:, i:i + 1, :, :], base_latent, alpha=zca_alpha)
+                             for i in range(other_latent.shape[1])]
+        result_zca = torch.cat(other_latent_list, dim=1)
+        print(f"ZCA transformed other_latent shape: {result_zca.shape}")
+        latents = torch.cat([base_latent, result_zca], dim=1).unsqueeze(0)
+
         latents = latents.to(device = device, dtype = vae.dtype)
+
+        print(f"Decoding latents with shape: {latents.shape}")
 
         mm.soft_empty_cache()
 
@@ -2271,6 +2284,68 @@ class WanVideoDecode:
         images.clamp_(0.0, 1.0)
 
         return (images.permute(1, 2, 3, 0),)
+
+    # ZCA Whitening (preserves more structure)
+    def __zca_whiten_and_color(self, content_feat, style_feat, alpha=1.0, epsilon=1e-5):
+        """
+        Apply ZCA-based Whitening and Coloring Transform.
+        ZCA whitening preserves the original data structure better than PCA whitening.
+
+        Args:
+            content_feat: Content feature tensor [C, T-1, H, W]
+            style_feat: Style feature tensor [C, 1, H, W]
+            alpha: Style transfer strength (0.0 to 1.0)
+            epsilon: Small constant to avoid division by zero
+
+        Returns:
+            Transformed feature tensor with style transferred
+        """
+        # Get dimensions
+        C, T_minus_1, H, W = content_feat.shape
+
+        # Reshape features
+        content_flat = content_feat.reshape(C, -1)
+        style_flat = style_feat.reshape(C, -1)
+
+        # Center the data
+        content_mean = torch.mean(content_flat, dim=1, keepdim=True)
+        content_centered = content_flat - content_mean
+
+        style_mean = torch.mean(style_flat, dim=1, keepdim=True)
+        style_centered = style_flat - style_mean
+
+        # Compute covariance matrices
+        N_c = content_centered.shape[1]
+        N_s = style_centered.shape[1]
+
+        content_cov = torch.mm(content_centered, content_centered.t()) / (N_c - 1)
+        style_cov = torch.mm(style_centered, style_centered.t()) / (N_s - 1)
+
+        # SVD for content covariance
+        U_c, S_c, _ = torch.svd(content_cov)
+        S_c = torch.clamp(S_c, min=epsilon)
+
+        # SVD for style covariance
+        U_s, S_s, _ = torch.svd(style_cov)
+        S_s = torch.clamp(S_s, min=epsilon)
+
+        # ZCA whitening: U_c * S_c^(-1/2) * U_c^T
+        whitening_matrix = torch.mm(torch.mm(U_c, torch.diag(1.0 / torch.sqrt(S_c))), U_c.t())
+
+        # ZCA coloring: U_s * S_s^(1/2) * U_s^T
+        coloring_matrix = torch.mm(torch.mm(U_s, torch.diag(torch.sqrt(S_s))), U_s.t())
+
+        # Apply transformation
+        content_whitened = torch.mm(whitening_matrix, content_centered)
+        content_styled = torch.mm(coloring_matrix, content_whitened) + style_mean
+
+        # Blend with original
+        content_styled = alpha * content_styled + (1 - alpha) * content_flat
+
+        # Reshape back
+        content_styled = content_styled.reshape(C, T_minus_1, H, W)
+
+        return content_styled
 
 #region VideoEncode
 class WanVideoEncodeLatentBatch:
