@@ -15,6 +15,11 @@ except ImportError:
     FlowMatchEulerDiscreteScheduler = None
     DEISMultistepScheduler = None
 
+try:
+    from .iching_wuxing_scheduler_core import IChingWuxingScheduler
+except ImportError:
+    IChingWuxingScheduler = None
+
 scheduler_list = [
     "unipc", "unipc/beta",
     "dpm++", "dpm++/beta",
@@ -29,6 +34,13 @@ scheduler_list = [
     "flowmatch_pusa",
     "multitalk",
     "sa_ode_stable",
+    "iching/wuxing",
+    "iching/wuxing-strong",
+    "iching/wuxing-stable",
+    "iching/wuxing-smooth",
+    "iching/wuxing-clean",
+    "iching/wuxing-sharp",
+    "iching/wuxing-lowstep",
     "rcm"
 ]
 
@@ -120,6 +132,11 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
     elif "sa_ode_stable" in scheduler:
         sample_scheduler = FlowMatchSAODEStableScheduler(shift=shift, **kwargs)
         sample_scheduler.set_timesteps(steps, device=device, sigmas=sigmas[:-1].tolist() if sigmas is not None else None)
+    elif scheduler.startswith('iching/'):
+        if IChingWuxingScheduler is None:
+            raise ImportError("IChingWuxingScheduler is not available. The compiled module may be missing.")
+        sample_scheduler = IChingWuxingScheduler(mode=scheduler)
+        sample_scheduler.set_timesteps(steps, device=device)
     elif 'rcm' in scheduler:
         sample_scheduler = rCMFlowMatchScheduler()
         sample_scheduler.set_timesteps(steps, sigma_max=120)
@@ -156,7 +173,6 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             end_idx = end_step - 1
 
     # Slice timesteps and sigmas once, based on indices
-    all_timesteps = timesteps
     timesteps = timesteps[start_idx:end_idx+1]
     sample_scheduler.full_sigmas = sample_scheduler.sigmas.clone()
     sample_scheduler.sigmas = sample_scheduler.sigmas[start_idx:start_idx+len(timesteps)+1]  # always one longer
@@ -168,6 +184,5 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
 
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
-    setattr(sample_scheduler, 'all_timesteps', all_timesteps)
 
     return sample_scheduler, timesteps, start_idx, end_idx
