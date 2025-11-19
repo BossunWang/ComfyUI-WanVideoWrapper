@@ -1604,6 +1604,10 @@ class WanVideoVACEEncode:
             "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001}),
             "vace_start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the steps to apply VACE"}),
             "vace_end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the steps to apply VACE"}),
+            "inactive_latent_enhance": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01,
+                                             "tooltip": "latent enhancement multiplier for inactive regions"}),
+            "reactive_latent_enhance": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01,
+                                           "tooltip": "latent enhancement multiplier for reactive regions"}),
             },
             "optional": {
                 "input_frames": ("IMAGE",),
@@ -1619,7 +1623,9 @@ class WanVideoVACEEncode:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
-    def process(self, vae, width, height, num_frames, strength, vace_start_percent, vace_end_percent, input_frames=None, ref_images=None, input_masks=None, prev_vace_embeds=None, tiled_vae=False):
+    def process(self, vae, width, height, num_frames, strength, vace_start_percent, vace_end_percent,
+                inactive_latent_enhance, reactive_latent_enhance,
+                input_frames=None, ref_images=None, input_masks=None, prev_vace_embeds=None, tiled_vae=False):
         width = (width // 16) * 16
         height = (height // 16) * 16
 
@@ -1672,7 +1678,11 @@ class WanVideoVACEEncode:
             ref_images = ref_images * 2 - 1
 
         vae = vae.to(device)
-        z0 = self.vace_encode_frames(vae, input_frames, ref_images, masks=input_masks, tiled_vae=tiled_vae)
+        z0 = self.vace_encode_frames(vae, input_frames, ref_images, masks=input_masks, tiled_vae=tiled_vae,
+                                     inactive_latent_enhance=inactive_latent_enhance,
+                                     reactive_latent_enhance=reactive_latent_enhance)
+
+        print(f'VACE encoded latent shapes: {[zz.shape for zz in z0]}')
         
         m0 = self.vace_encode_masks(input_masks, ref_images)
         z = self.vace_latent(z0, m0)
@@ -1686,6 +1696,8 @@ class WanVideoVACEEncode:
             "target_shape": target_shape,
             "vace_start_percent": vace_start_percent,
             "vace_end_percent": vace_end_percent,
+            "inactive_latent_enhance": inactive_latent_enhance,
+            "reactive_latent_enhance": reactive_latent_enhance,
             "vace_seq_len": math.ceil((z[0].shape[2] * z[0].shape[3]) / 4 * z[0].shape[1]),
             "additional_vace_inputs": [],
         }
@@ -1696,8 +1708,33 @@ class WanVideoVACEEncode:
             vace_input["additional_vace_inputs"].append(prev_vace_embeds)
     
         return (vace_input,)
-    
-    def vace_encode_frames(self, vae, frames, ref_images, masks=None, tiled_vae=False):
+
+    def __dynamic_latent_enhancement(self, latent, motion_amplitude):
+        print(f"\n🎨 [PainterI2V] 应用动态增强: amplitude={motion_amplitude:.2f}")
+
+        base_latent = latent[:, 0:1]  # [C, 1, H, W]
+        other_latent = latent[:, 1:]  # [C, T-1, H, W]
+
+        # 广播首帧
+        base_latent_bc = base_latent.expand(-1, other_latent.shape[1], -1, -1)
+
+        # 计算差异并增强（保持亮度稳定）
+        diff = other_latent - base_latent_bc
+        diff_mean = diff.mean(dim=(0, 2, 3), keepdim=True)
+        print(f"Diff mean shape: {diff_mean.shape}")
+        diff_centered = diff - diff_mean
+        scaled_other = base_latent_bc + diff_centered * motion_amplitude + diff_mean
+
+        # 安全裁剪
+        scaled_other = torch.clamp(scaled_other, -6, 6)
+
+        # 重组
+        y = torch.cat([base_latent, scaled_other], dim=1)
+        print("✅ 动态增强完成\n")
+        return y
+
+    def vace_encode_frames(self, vae, frames, ref_images, masks=None, tiled_vae=False,
+                           inactive_latent_enhance=1., reactive_latent_enhance=1.):
         if ref_images is None:
             ref_images = [None] * len(frames)
         else:
@@ -1712,9 +1749,17 @@ class WanVideoVACEEncode:
             del frames
             inactive = vae.encode(inactive, device=device, tiled=tiled_vae)
             reactive = vae.encode(reactive, device=device, tiled=tiled_vae)
-            latents = [torch.cat((u, c), dim=0) for u, c in zip(inactive, reactive)]
+
+            latents = [torch.cat((self.__dynamic_latent_enhancement(u,
+                                                                    motion_amplitude=reactive_latent_enhance),
+                                  self.__dynamic_latent_enhancement(c,
+                                                                    motion_amplitude=inactive_latent_enhance)),
+                                 dim=0) for u, c in zip(inactive, reactive)]
+
+            print(f'inactive shapes after mask encoding: {[u.shape for u in inactive]}')
+            print(f'reactive shapes after mask encoding: {[u.shape for u in reactive]}')
+            print(f'latents shapes after mask encoding: {[u.shape for u in latents]}')
             del inactive, reactive
-        
         
         cat_latents = []
         for latent, refs in zip(latents, ref_images):
