@@ -2152,12 +2152,16 @@ class WanVideoAddTTMLatents:
         if end_step < max(0, start_step):
             raise ValueError(f"`end_step` ({end_step}) must be >= `start_step` ({start_step}).")
 
-        mask_sampled = mask[::VAE_STRIDE[0]]
+        mask_sampled = mask[::4]
         mask_sampled = mask_sampled.unsqueeze(1).unsqueeze(0)  # [1, T, 1, H, W]
 
+        vae_upscale_factor = 8
+        if reference_latents["samples"].shape[1] == 48:
+            vae_upscale_factor = 16
+
         # Upsample spatially to latent resolution
-        H_latent = mask_sampled.shape[-2] // VAE_STRIDE[1]
-        W_latent = mask_sampled.shape[-1] // VAE_STRIDE[1]
+        H_latent = mask_sampled.shape[-2] // vae_upscale_factor
+        W_latent = mask_sampled.shape[-1] // vae_upscale_factor
         mask_latent = F.interpolate(
             mask_sampled.float(),
             size=(mask_sampled.shape[2], H_latent, W_latent),
