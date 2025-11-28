@@ -872,6 +872,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
         
         key = name.replace("_orig_mod.", "")
         value=sd[key]
+        keep_fp32 = ["patch_embedding", "motion_encoder", "condition_embedding"]
 
         if gguf:
             dtype_to_use = torch.float32 if "patch_embedding" in name or "motion_encoder" in name else base_dtype
@@ -883,7 +884,7 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
                 dtype_to_use = value.dtype
             if "bias" in name or "img_emb" in name:
                 dtype_to_use = base_dtype
-            if "patch_embedding" in name or "motion_encoder" in name:
+            if any(k in name for k in keep_fp32):
                 dtype_to_use = torch.float32
             if "modulation" in name or "norm" in name:
                 dtype_to_use = value.dtype if value.dtype == torch.float32 else base_dtype
@@ -1498,6 +1499,21 @@ class WanVideoModelLoader:
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
         )
+
+        # SteadyDancer
+        if "condition_embedding_align.cross_attn.in_proj_bias" in sd:
+            from .steadydancer.mobilenetv2_dcd import DYModule
+            from .steadydancer.small_archs import PoseRefNetNoBNV3, FactorConv3d
+            in_dim_c = 16
+            transformer.patch_embedding_fuse = nn.Conv3d(in_channels + in_dim_c + in_dim_c, dim, kernel_size=patch_size, stride=patch_size) # x, fused pose, aligned pose
+            transformer.patch_embedding_ref_c = nn.Conv3d(in_dim_c, dim, kernel_size=patch_size, stride=patch_size) # ref_c
+            transformer.condition_embedding_spatial = DYModule(inp=in_dim_c, oup=in_dim_c) # Spatial Structure Adaptive Extractor
+            transformer.condition_embedding_temporal = nn.Sequential( # Temporal Motion Coherence Module
+                FactorConv3d(in_channels=in_dim_c, out_channels=in_dim_c, kernel_size=(3, 3, 3), stride=1), nn.SiLU(),
+                FactorConv3d(in_channels=in_dim_c, out_channels=in_dim_c, kernel_size=(3, 3, 3), stride=1), nn.SiLU(),
+                FactorConv3d(in_channels=in_dim_c, out_channels=in_dim_c, kernel_size=(3, 3, 3), stride=1), nn.SiLU())
+            transformer.condition_embedding_align = PoseRefNetNoBNV3(in_channels_x=16, in_channels_c=16, hidden_dim=128, num_heads=8) # Frame-wise Attention Alignment Unit
+
 
         comfy_model.diffusion_model = transformer
         comfy_model.load_device = transformer_load_device

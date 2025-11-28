@@ -1171,6 +1171,15 @@ class WanVideoSampler:
 
                 latent = add_noise(ttm_reference_latents, noise, timesteps[ttm_start_step].to(noise.device)).to(latent)
 
+        # SteadyDancer
+        sdance_embeds = image_embeds.get("sdance_embeds", None)
+        sdancer_input = None
+        if sdance_embeds is not None:
+            print("Using SteadyDancer embeddings")
+            print(f"SteadyDancer embeds keys: {list(sdance_embeds.keys())}")
+            sdancer_input = sdance_embeds.copy()
+            sdancer_input = dict_to_device(sdancer_input, device, dtype)
+
         #region model pred
         def predict_with_cfg(z, cfg_scale, positive_embeds, negative_embeds, timestep, idx, image_cond=None, clip_fea=None,
                              control_latents=None, vace_data=None, unianim_data=None, audio_proj=None, control_camera_latents=None,
@@ -1450,6 +1459,7 @@ class WanVideoSampler:
                     "flashvsr_LQ_latent": flashvsr_LQ_latent, # FlashVSR LQ latent for upsampling
                     "flashvsr_strength": flashvsr_strength, # FlashVSR strength
                     "num_cond_latents": len(all_indices) if transformer.is_longcat else None,
+                    "sdancer_input": sdancer_input, # SteadyDancer input
                 }
 
                 batch_size = 1
