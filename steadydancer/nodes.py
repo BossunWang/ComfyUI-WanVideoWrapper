@@ -39,7 +39,7 @@ class WanVideoAddSteadyDancerEmbeds:
     CATEGORY = "WanVideoWrapper"
 
     def add(self, embeds, pose_latents_positive, pose_strength_spatial, pose_strength_temporal, start_percent=0.0, end_percent=1.0, pose_latents_negative=None, clip_vision_embeds=None):
-        sdance_embeds = {
+        sdancer_embeds = {
             "cond_pos": pose_latents_positive["samples"][0],
             "cond_neg": pose_latents_negative["samples"][0] if pose_latents_negative else None,
             "pose_strength_spatial": pose_strength_spatial,
@@ -50,7 +50,7 @@ class WanVideoAddSteadyDancerEmbeds:
         }
 
         updated = dict(embeds)
-        updated["sdance_embeds"] = sdance_embeds
+        updated["sdancer_embeds"] = sdancer_embeds
         return (updated,)
 
 
