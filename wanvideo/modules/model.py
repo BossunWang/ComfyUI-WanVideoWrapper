@@ -412,11 +412,8 @@ class WanSelfAttention(nn.Module):
         v = self.v(x).view(b, s, n, d)
         return q, k, v
 
-    def qkv_fn_qk_with_rope(self, x, layer, freqs, num_chunks=1, is_longcat=False):
+    def _qkv_fn_with_rope(self, x, linear_layer, norm_layer, freqs, num_chunks=1, is_longcat=False):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-
-        linear_layer = self.q if layer == 'q' else self.k
-        norm_layer = self.norm_q if layer == 'q' else self.norm_k
         
         use_chunked = num_chunks > 1
         if use_chunked:
@@ -448,6 +445,12 @@ class WanSelfAttention(nn.Module):
             else:
                 result = norm_layer(linear_layer(x).to(norm_layer.weight.dtype)).to(x.dtype).view(b, s, n, d)
             return apply_rope_comfy1(result, freqs)
+
+    def qkv_fn_q_with_rope(self, x, freqs, num_chunks=1, is_longcat=False):
+        return self._qkv_fn_with_rope(x, self.q, self.norm_q, freqs, num_chunks, is_longcat)
+
+    def qkv_fn_k_with_rope(self, x, freqs, num_chunks=1, is_longcat=False):
+        return self._qkv_fn_with_rope(x, self.k, self.norm_k, freqs, num_chunks, is_longcat)
 
     def qkv_fn_v(self, x):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
@@ -1080,12 +1083,12 @@ class WanAttentionBlock(nn.Module):
             x_main, x_ip_input = input_x[:, : -self.cond_size], input_x[:, -self.cond_size :]
             # Compute QKV for main content
             if self.rope_func == "comfy":
-                q = self.self_attn.qkv_fn_qk_with_rope(x_main, "q", freqs)
-                k = self.self_attn.qkv_fn_qk_with_rope(x_main, "k", freqs)
+                q = self.self_attn.qkv_fn_q_with_rope(x_main, freqs)
+                k = self.self_attn.qkv_fn_k_with_rope(x_main, freqs)
                 v = self.self_attn.qkv_fn_v(x_main)
             elif self.rope_func == "comfy_chunked":
-                q = self.self_attn.qkv_fn_qk_with_rope(x_main, "q", freqs, num_chunks=2)
-                k = self.self_attn.qkv_fn_qk_with_rope(x_main, "k", freqs, num_chunks=2)
+                q = self.self_attn.qkv_fn_q_with_rope(x_main, freqs, num_chunks=2)
+                k = self.self_attn.qkv_fn_k_with_rope(x_main, freqs, num_chunks=2)
                 v = self.self_attn.qkv_fn_v(x_main)
             # Compute QKV for IP content
             if "comfy" in self.rope_func:
@@ -1094,8 +1097,8 @@ class WanAttentionBlock(nn.Module):
         else:
             if "comfy" in self.rope_func:
                 num_chunks = 2 if self.rope_func == "comfy_chunked" else 1
-                q = self.self_attn.qkv_fn_qk_with_rope(input_x, "q", freqs, num_chunks=num_chunks, is_longcat=is_longcat)
-                k = self.self_attn.qkv_fn_qk_with_rope(input_x, "k", freqs, num_chunks=num_chunks, is_longcat=is_longcat)
+                q = self.self_attn.qkv_fn_q_with_rope(input_x, freqs, num_chunks=num_chunks, is_longcat=is_longcat)
+                k = self.self_attn.qkv_fn_k_with_rope(input_x, freqs, num_chunks=num_chunks, is_longcat=is_longcat)
                 v = self.self_attn.qkv_fn_v(input_x)
             else:
                 q, k, v = self.self_attn.qkv_fn(input_x)
