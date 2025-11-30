@@ -640,7 +640,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         self.k_fusion = None
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, audio_scale=1.0, 
-                num_latent_frames=21, nag_params={}, nag_context=None, is_uncond=False, rope_func="comfy", 
+                num_latent_frames=21, nag_params={}, nag_context=None, rope_func="comfy", 
                 inner_t=None, inner_c=None, cross_freqs=None,
                 adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, lynx_x_ip=None, lynx_ip_scale=1.0, num_cond_latents=None, **kwargs):
         b, n, d = x.size(0), self.num_heads, self.head_dim
@@ -656,7 +656,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         else:
             q = self.norm_q(self.q(x).to(self.norm_q.weight.dtype),num_chunks=2 if rope_func == "comfy_chunked" else 1).to(x.dtype).view(b, -1, n, d)
 
-        if nag_context is not None and not is_uncond:
+        if nag_context is not None:
             x = self.normalized_attention_guidance(b, n, d, q, context, nag_context, nag_params)
         else:
             if is_longcat:
@@ -667,7 +667,7 @@ class WanT2VCrossAttention(WanSelfAttention):
             v = self.v(context).view(b, -1, n, d)
 
             #EchoShot rope
-            if inner_t is not None and cross_freqs is not None and not is_uncond:
+            if inner_t is not None and cross_freqs is not None:
                 q = rope_apply_z(q, grid_sizes, cross_freqs, inner_t).to(q)
                 k = rope_apply_c(k, cross_freqs, inner_c).to(q)
 
@@ -736,7 +736,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         self.attention_mode = attention_mode
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, 
-                audio_scale=1.0, num_latent_frames=21, nag_params={}, nag_context=None, is_uncond=False, rope_func="comfy", 
+                audio_scale=1.0, num_latent_frames=21, nag_params={}, nag_context=None, rope_func="comfy", 
                 adapter_proj=None, adapter_attn_mask=None, ip_scale=1.0, orig_seq_len=None, **kwargs):
         r"""
         Args:
@@ -747,7 +747,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         # compute query
         q = self.norm_q(self.q(x).to(self.norm_q.weight.dtype),num_chunks=2 if rope_func == "comfy_chunked" else 1).view(b, -1, n, d).to(x.dtype)
 
-        if nag_context is not None and not is_uncond:
+        if nag_context is not None:
             x_text = self.normalized_attention_guidance(b, n, d, q, context, nag_context, nag_params)
         else:
             # text attention
@@ -1003,7 +1003,6 @@ class WanAttentionBlock(nn.Module):
         original_seq_len=None,
         enhance_enabled=False, #feta
         nag_params={}, nag_context=None, #normalized attention guidance
-        is_uncond=False,
         multitalk_audio_embedding=None, ref_target_masks=None, human_num=0, #multitalk
         inner_t=None, inner_c=None, cross_freqs=None, #echoshot
         x_ip=None, e_ip=None, freqs_ip=None, ip_scale=1.0, #stand-in
@@ -1233,7 +1232,7 @@ class WanAttentionBlock(nn.Module):
                 return x, x_ip, lynx_ref_feature, x_ovi
             else:
                 x = x + self.cross_attn(self.norm3(x.to(self.norm3.weight.dtype)).to(input_dtype), context, grid_sizes, clip_embed=clip_embed, audio_proj=audio_proj, audio_scale=audio_scale,
-                                    num_latent_frames=num_latent_frames, nag_params=nag_params, nag_context=nag_context, is_uncond=is_uncond,
+                                    num_latent_frames=num_latent_frames, nag_params=nag_params, nag_context=nag_context,
                                     rope_func=self.rope_func, inner_t=inner_t, inner_c=inner_c, cross_freqs=cross_freqs,
                                     adapter_proj=adapter_proj, ip_scale=ip_scale, orig_seq_len=original_seq_len, lynx_x_ip=lynx_x_ip, lynx_ip_scale=lynx_ip_scale, num_cond_latents=num_cond_latents)
                 x = x.to(input_dtype)
@@ -2804,13 +2803,13 @@ class WanModel(torch.nn.Module):
                 original_seq_len=self.original_seq_len,
                 enhance_enabled=enhance_enabled,
                 audio_scale=audio_scale,
-                nag_params=nag_params, nag_context=nag_context,
-                is_uncond = is_uncond,
+                nag_params=nag_params,
+                nag_context=nag_context if not is_uncond else None,
                 multitalk_audio_embedding=multitalk_audio_embedding if multitalk_audio is not None else None,
                 ref_target_masks=token_ref_target_masks if multitalk_audio is not None else None,
                 human_num=human_num if multitalk_audio is not None else 0,
                 inner_t=inner_t, inner_c=inner_c,
-                cross_freqs=self.cross_freqs if inner_t is not None else None,
+                cross_freqs=self.cross_freqs if inner_t is not None and not is_uncond else None,
                 freqs_ip=freqs_ip if x_ip is not None else None,
                 e_ip=e0_ip if x_ip is not None else None,
                 adapter_proj=adapter_proj,
