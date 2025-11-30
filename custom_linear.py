@@ -96,6 +96,7 @@ class CustomLinear(nn.Linear):
 
         if not allow_compile:
             self._get_weight_with_lora = torch.compiler.disable()(self._get_weight_with_lora)
+            self.forward = torch.compiler.disable()(self.forward)
     
     def set_lora_diffs(self, lora_diffs, device=torch.device("cpu")):
         self.lora_diffs = []
