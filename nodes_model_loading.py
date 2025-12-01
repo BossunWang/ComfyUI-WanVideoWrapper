@@ -1694,6 +1694,7 @@ class WanVideoVAELoader:
                     {"default": "bf16"}
                 ),
                 "compile_args": ("WANCOMPILEARGS", ),
+                "use_cpu_cache": ("BOOLEAN", {"default": False, "tooltip": "Reduces VRAM usage, but slows the VAE down a lot"}),
             }
         }
 
@@ -1703,7 +1704,7 @@ class WanVideoVAELoader:
     CATEGORY = "WanVideoWrapper"
     DESCRIPTION = "Loads Wan VAE model from 'ComfyUI/models/vae'"
 
-    def loadmodel(self, model_name, precision, compile_args=None):
+    def loadmodel(self, model_name, precision, compile_args=None, use_cpu_cache=False):
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         model_path = folder_paths.get_full_path_or_raise("vae", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
@@ -1720,9 +1721,9 @@ class WanVideoVAELoader:
             pruning_rate = 0.0
 
         if vae_sd["model.conv2.weight"].shape[0] == 16:
-            vae = WanVideoVAE(dtype=dtype, pruning_rate=pruning_rate)
+            vae = WanVideoVAE(dtype=dtype, pruning_rate=pruning_rate, cpu_cache=use_cpu_cache)
         elif vae_sd["model.conv2.weight"].shape[0] == 48:
-            vae = WanVideoVAE38(dtype=dtype, pruning_rate=pruning_rate)
+            vae = WanVideoVAE38(dtype=dtype, pruning_rate=pruning_rate, cpu_cache=use_cpu_cache)
 
         vae.load_state_dict(vae_sd)
         del vae_sd
