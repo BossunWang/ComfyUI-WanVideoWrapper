@@ -145,10 +145,6 @@ class CustomLinear(nn.Linear):
         self.is_gguf = is_gguf
 
         if not allow_compile:
-            # Disable compilation for both methods
-            #self._get_weight_with_lora = torch.compiler.disable()(self._get_weight_with_lora)
-            #self.forward = torch.compiler.disable()(self.forward)
-            # Use regular implementations instead of custom ops
             self._apply_lora_impl = self._apply_lora_custom_op
             self._apply_single_lora_impl = self._apply_single_lora_custom_op
             self._linear_forward_impl = self._linear_forward_custom_op
@@ -163,7 +159,7 @@ class CustomLinear(nn.Linear):
         patch_diff = torch.mm(
             lora_diff_0.flatten(start_dim=1),
             lora_diff_1.flatten(start_dim=1)
-        ).reshape(weight.shape)
+        ).reshape(weight.shape) + 0
         alpha = lora_diff_2 / lora_diff_1.shape[0] if lora_diff_2 != 0.0 else 1.0
         scale = lora_strength * alpha
         return weight.add(patch_diff, alpha=scale)
