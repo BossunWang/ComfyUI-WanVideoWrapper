@@ -7,6 +7,7 @@ from .flowmatch_res_multistep import FlowMatchSchedulerResMultistep
 from .scheduling_flow_match_lcm import FlowMatchLCMScheduler
 from .fm_sa_ode import FlowMatchSAODEStableScheduler
 from .fm_rcm import rCMFlowMatchScheduler
+from .vitb_unipc import ViBTScheduler
 from ...utils import log
 
 try:
@@ -34,6 +35,8 @@ scheduler_list = [
     "flowmatch_pusa",
     "multitalk",
     "sa_ode_stable",
+    "rcm",
+    "vitb_unipc",
     "iching/wuxing",
     "iching/wuxing-strong",
     "iching/wuxing-stable",
@@ -46,7 +49,11 @@ scheduler_list = [
 
 def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transformer_dim=5120, flowedit_args=None, denoise_strength=1.0, sigmas=None, log_timesteps=False, **kwargs):
     timesteps = None
-    if 'unipc' in scheduler:
+    if scheduler == 'vitb_unipc':
+        sample_scheduler = ViBTScheduler()
+        sample_scheduler.set_parameters(shift=shift)
+        sample_scheduler.set_timesteps(steps, device=device)
+    elif 'unipc' in scheduler:
         sample_scheduler = FlowUniPCMultistepScheduler(shift=shift)
         if sigmas is None:
             sample_scheduler.set_timesteps(steps, device=device, shift=shift, use_beta_sigmas=('beta' in scheduler))
@@ -54,7 +61,6 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             sample_scheduler.sigmas = sigmas.to(device)
             sample_scheduler.timesteps = (sample_scheduler.sigmas[:-1] * 1000).to(torch.int64).to(device)
             sample_scheduler.num_inference_steps = len(sample_scheduler.timesteps)
-
     elif scheduler in ['euler/beta', 'euler', 'longcat_distill_euler']:
         if 'longcat' in scheduler:
             num_distill_sample_steps = 50
@@ -173,6 +179,7 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
             end_idx = end_step - 1
 
     # Slice timesteps and sigmas once, based on indices
+    all_timesteps = timesteps
     timesteps = timesteps[start_idx:end_idx+1]
     sample_scheduler.full_sigmas = sample_scheduler.sigmas.clone()
     sample_scheduler.sigmas = sample_scheduler.sigmas[start_idx:start_idx+len(timesteps)+1]  # always one longer
@@ -184,5 +191,6 @@ def get_scheduler(scheduler, steps, start_step, end_step, shift, device, transfo
 
     if hasattr(sample_scheduler, 'timesteps'):
         sample_scheduler.timesteps = timesteps
+    setattr(sample_scheduler, 'all_timesteps', all_timesteps)
 
     return sample_scheduler, timesteps, start_idx, end_idx
