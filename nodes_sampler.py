@@ -68,6 +68,7 @@ def offload_transformer(transformer):
                 setattr(module, attr_name, MetaParameter(param.data.dtype, quant_type))
             else:
                 pass
+        remove_lora_from_module(transformer)
     else:
         transformer.to(offload_device)
 
