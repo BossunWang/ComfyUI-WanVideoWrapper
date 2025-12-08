@@ -88,10 +88,11 @@ except:
 
 def attention(q, k, v, q_lens=None, k_lens=None, max_seqlen_q=None, max_seqlen_k=None, dropout_p=0.,
     softmax_scale=None, q_scale=None, causal=False,  window_size=(-1, -1), deterministic=False, dtype=torch.bfloat16,
-    attention_mode='sdpa', attn_mask=None, multi_factor=0.9):
+    attention_mode='sdpa', attn_mask=None, multi_factor=0.9, return_attn=False):
     if "flash" in attention_mode:
         return flash_attention(q, k, v, q_lens=q_lens, k_lens=k_lens, dropout_p=dropout_p, softmax_scale=softmax_scale,
             q_scale=q_scale, causal=causal, window_size=window_size, deterministic=deterministic, dtype=dtype, version=2 if attention_mode == 'flash_attn_2' else 3,
+            return_attn=return_attn,
         )
     elif attention_mode == 'sageattn_3':
         return sageattn_blackwell(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2), per_block_mean=False).transpose(1,2).contiguous()

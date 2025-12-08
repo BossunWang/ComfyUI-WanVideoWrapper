@@ -2350,6 +2350,263 @@ class WanVideoEncode:
  
         return ({"samples": latents, "noise_mask": mask},)
 
+
+class WanVideoTempoControlArgs:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "t5": ("WANTEXTENCODER",),
+                "prompt": ("STRING", {
+                    "multiline": False,
+                    "default": "A red ball rolling across the floor",
+                    "tooltip": "The text prompt used for generation"
+                }),
+                "target_objects": ("STRING", {
+                    "multiline": True,
+                    "default": "ball",
+                    "tooltip": "Comma-separated list of objects to control (e.g., 'ball, cat, dog')"
+                }),
+                "control_signals": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "JSON array of control signals, one per target object. Format: [[0,0,1,1,...], [1,1,0,0,...]]"
+                }),
+                "learning_rate": ("FLOAT", {
+                    "default": 20.0,
+                    "min": 0.1,
+                    "max": 100.0,
+                    "step": 0.1,
+                    "tooltip": "Learning rate for optimization"
+                }),
+                "max_iterations": ("INT", {
+                    "default": 10,
+                    "min": 1,
+                    "max": 100,
+                    "step": 1,
+                    "tooltip": "Maximum number of optimization iterations per step"
+                }),
+                "start_percent": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Start applying TempoControl at this percentage of sampling"
+                }),
+                "end_percent": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Stop applying TempoControl at this percentage of sampling"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("TEMPOCONTROLARGS",)
+    RETURN_NAMES = ("tempocontrol_args",)
+    FUNCTION = "process"
+    CATEGORY = "WanVideoWrapper/TempoControl"
+
+    def process(self, prompt, target_objects, t5, control_signals, learning_rate, max_iterations, start_percent,
+                end_percent):
+        import json
+        import torch
+
+        # Parse target objects
+        targets = [obj.strip() for obj in target_objects.split(",") if obj.strip()]
+
+        # Parse control signals
+        try:
+            signals_list = json.loads(control_signals) if control_signals.strip() else []
+            log.info("Parsed control signals size: {}".format(len(signals_list)))
+            signals_tensors = [torch.tensor(sig, dtype=torch.float32) for sig in signals_list]
+            signals_tensors = torch.stack(signals_tensors)
+            log.info("Control signals tensor shape: {}".format(signals_tensors.shape))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format for control_signals: {e}")
+
+        # Validate that we have matching signals for targets
+        if len(signals_tensors) != len(targets):
+            raise ValueError(
+                f"Number of control signals ({len(signals_tensors)}) must match number of target objects ({len(targets)})")
+        tokenizer = t5["model"].tokenizer if hasattr(t5["model"], 'tokenizer') else None
+
+        return ({
+                    "prompt": prompt,
+                    "target_objects": targets,
+                    "tokenizer": tokenizer,
+                    "control_signals": signals_tensors,
+                    "learning_rate": learning_rate,
+                    "max_iterations": max_iterations,
+                    "start_percent": start_percent,
+                    "end_percent": end_percent,
+                },)
+
+
+class WanVideoTempoControlSignalGenerator:
+    """Helper node to generate control signals for multiple objects"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "total_frames": ("INT", {
+                    "default": 81,
+                    "min": 1,
+                    "max": 1000,
+                    "tooltip": "Total number of frames in the video"
+                }),
+                "num_objects": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 10,
+                    "tooltip": "Number of objects to control"
+                }),
+            },
+            "optional": {
+                # Object 1
+                "object1_start_frame": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 1 starts appearing"
+                }),
+                "object1_end_frame": ("INT", {
+                    "default": 81,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 1 stops appearing"
+                }),
+                "object1_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of control signal for object 1"
+                }),
+
+                # Object 2
+                "object2_start_frame": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 2 starts appearing"
+                }),
+                "object2_end_frame": ("INT", {
+                    "default": 81,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 2 stops appearing"
+                }),
+                "object2_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of control signal for object 2"
+                }),
+
+                # Object 3
+                "object3_start_frame": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 3 starts appearing"
+                }),
+                "object3_end_frame": ("INT", {
+                    "default": 81,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 3 stops appearing"
+                }),
+                "object3_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of control signal for object 3"
+                }),
+
+                # Object 4
+                "object4_start_frame": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 4 starts appearing"
+                }),
+                "object4_end_frame": ("INT", {
+                    "default": 81,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 4 stops appearing"
+                }),
+                "object4_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of control signal for object 4"
+                }),
+
+                # Object 5
+                "object5_start_frame": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 5 starts appearing"
+                }),
+                "object5_end_frame": ("INT", {
+                    "default": 81,
+                    "min": 0,
+                    "max": 1000,
+                    "tooltip": "Frame when object 5 stops appearing"
+                }),
+                "object5_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of control signal for object 5"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("control_signals_json",)
+    FUNCTION = "generate"
+    CATEGORY = "WanVideoWrapper/TempoControl"
+
+    def generate(self, total_frames, num_objects, **kwargs):
+        import json
+        import torch
+
+        # Generate signals for each object
+        all_signals = []
+
+        for obj_idx in range(1, num_objects + 1):
+            # Get parameters for this object (with defaults)
+            start_frame = kwargs.get(f"object{obj_idx}_start_frame", 0)
+            end_frame = kwargs.get(f"object{obj_idx}_end_frame", total_frames)
+            strength = kwargs.get(f"object{obj_idx}_strength", 1.0)
+
+            # Clamp values to valid range
+            start_frame = max(0, min(start_frame, total_frames))
+            end_frame = max(0, min(end_frame, total_frames))
+
+            # Create control signal for this object
+            signal = torch.zeros(total_frames)
+            if end_frame > start_frame:
+                signal[start_frame:end_frame] = strength
+
+            all_signals.append(signal.tolist())
+
+        # Convert to JSON array of arrays
+        signals_json = json.dumps(all_signals)
+
+        return (signals_json,)
+
+
 NODE_CLASS_MAPPINGS = {
     "WanVideoDecode": WanVideoDecode,
     "WanVideoTextEncode": WanVideoTextEncode,
@@ -2391,6 +2648,8 @@ NODE_CLASS_MAPPINGS = {
     "TextImageEncodeQwenVL": TextImageEncodeQwenVL,
     "WanVideoUniLumosEmbeds": WanVideoUniLumosEmbeds,
     "WanVideoAddTTMLatents": WanVideoAddTTMLatents,
+    "WanVideoTempoControlArgs": WanVideoTempoControlArgs,
+    "WanVideoTempoControlSignalGenerator": WanVideoTempoControlSignalGenerator,
     }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2433,4 +2692,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoAddBindweaveEmbeds": "WanVideo Add Bindweave Embeds",
     "WanVideoUniLumosEmbeds": "WanVideo UniLumos Embeds",
     "WanVideoAddTTMLatents": "WanVideo Add TTMLatents",
+    "WanVideoTempoControlArgs": "WanVideo TempoControl Args",
+    "WanVideoTempoControlSignalGenerator": "WanVideo TempoControl Signal Generator",
 }

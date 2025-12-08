@@ -6,6 +6,7 @@ from einops import repeat, rearrange
 from ...enhance_a_video.enhance import get_feta_scores
 import time
 from contextlib import nullcontext
+from typing import List
 
 try:
     from ..radial_attention.attn_mask import RadialSpargeSageAttn, RadialSpargeSageAttnDense, MaskMap
@@ -633,6 +634,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         self.attention_mode = attention_mode
         self.ip_adapter = None
         self.k_fusion = None
+        self.attn_weights = None
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, audio_scale=1.0, 
                 num_latent_frames=21, nag_params={}, nag_context=None, rope_func="comfy", 
@@ -666,7 +668,13 @@ class WanT2VCrossAttention(WanSelfAttention):
                 q = rope_apply_z(q, grid_sizes, cross_freqs, inner_t).to(q)
                 k = rope_apply_c(k, cross_freqs, inner_c).to(q)
 
-            x = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
+            if "flash" in self.attention_mode:
+                x, attn_weights = attention(q, k, v, attention_mode=self.attention_mode, return_attn=True)
+                x = x.flatten(2)
+                log.info(f'WanT2VCrossAttention attn_weights shape: {attn_weights.shape}')
+                self.attn_weights = attn_weights
+            else:
+                x = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
 
         if lynx_x_ip is not None and self.ip_adapter is not None and ip_scale !=0:
             lynx_x_ip = self.ip_adapter(self, q, lynx_x_ip)
@@ -729,6 +737,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         self.v_img = nn.Linear(in_features, out_features)
         self.norm_k_img = WanRMSNorm(out_features, eps=eps) if qk_norm else nn.Identity()
         self.attention_mode = attention_mode
+        self.attn_weights =  None
 
     def forward(self, x, context, grid_sizes=None, clip_embed=None, audio_proj=None, 
                 audio_scale=1.0, num_latent_frames=21, nag_params={}, nag_context=None, rope_func="comfy", 
@@ -748,7 +757,12 @@ class WanI2VCrossAttention(WanSelfAttention):
             # text attention
             k = self.norm_k(self.k(context).to(self.norm_k.weight.dtype)).view(b, -1, n, d).to(x.dtype)
             v = self.v(context).view(b, -1, n, d)
-            x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
+            if "flash" in self.attention_mode:
+                x_text, attn_weights = attention(q, k, v, attention_mode=self.attention_mode, return_attn=True)
+                x_text = x_text.flatten(2)
+                self.attn_weights = attn_weights
+            else:
+                x_text = attention(q, k, v, attention_mode=self.attention_mode).flatten(2)
 
         #img attention
         if clip_embed is not None:
@@ -1900,6 +1914,12 @@ class WanModel(torch.nn.Module):
                 dtype=dtype
             )
 
+        # TempoControl
+        self.tempocontrol = None
+        self.tempocontrol_active = False
+        self.tempocontrol_token_indices = []
+        self.tempocontrol_control_signals = []
+
     def block_swap(self, blocks_to_swap, offload_txt_emb=False, offload_img_emb=False, vace_blocks_to_swap=None, prefetch_blocks=0, block_swap_debug=False):
         # Clamp blocks_to_swap to valid range
         blocks_to_swap = max(0, min(blocks_to_swap, len(self.blocks)))
@@ -2868,6 +2888,22 @@ class WanModel(torch.nn.Module):
             if lynx_ref_buffer is None and lynx_ref_feature_extractor:
                 lynx_ref_buffer = {}
 
+            # TempoControl optimization
+            if self.tempocontrol_active and self.tempocontrol is not None:
+                external_kwargs = {'flashvsr_LQ_latent': flashvsr_LQ_latent, 'flashvsr_strength': flashvsr_strength,
+                                'swap_start_idx': swap_start_idx, 'cuda_stream': cuda_stream, 'events': events,
+                                'is_uncond': is_uncond, 'current_step_percentage': current_step_percentage}
+                log.info('Applying TempoControl optimization...')
+                x = self.tempocontrol.optimize_latent(
+                    latent=x,
+                    model=self,
+                    token_indices=self.tempocontrol_token_indices,
+                    control_signals=self.tempocontrol_control_signals,
+                    denoising_step=current_step,
+                    external_kwargs=external_kwargs,
+                    **kwargs,
+                )
+
             for b, block in enumerate(self.blocks):
                 mm.throw_exception_if_processing_interrupted()
                 block_idx = f"{b:02d}"
@@ -2960,8 +2996,8 @@ class WanModel(torch.nn.Module):
                     accumulated_error = 0.0,
                     cache_ovi = x_ovi.clone().to(original_x.device) - original_x_ovi if x_ovi is not None else None
                 )
-               
-                    
+
+
 
         if self.enable_easycache and (self.easycache_start_step <= current_step <= self.easycache_end_step) and pred_id is not None:
             self.easycache_state.update(
@@ -3023,3 +3059,27 @@ class WanModel(torch.nn.Module):
             u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
             out.append(u)
         return out
+
+    def enable_tempocontrol(
+            self,
+            token_indices: List[int],
+            control_signals: List[torch.Tensor],
+            **tempocontrol_kwargs
+    ):
+        """Enable TempoControl optimization"""
+        from .tempocontrol import TempoControl
+
+        self.tempocontrol = TempoControl(**tempocontrol_kwargs)
+        self.tempocontrol_token_indices = token_indices
+        self.tempocontrol_control_signals = control_signals
+        self.tempocontrol_active = True
+
+        # Register hooks to capture attention
+        self.tempocontrol.register_attention_hooks(self)
+
+    def disable_tempocontrol(self):
+        """Disable TempoControl optimization"""
+        if self.tempocontrol is not None:
+            self.tempocontrol.remove_hooks()
+        self.tempocontrol = None
+        self.tempocontrol_active = False

@@ -1,6 +1,7 @@
 from .model import WanModel
 from .t5 import T5Decoder, T5Encoder, T5EncoderModel, T5Model
 from .tokenizers import HuggingfaceTokenizer
+from .tempocontrol import TempoControl
 
 __all__ = [
     'WanModel',
@@ -9,4 +10,5 @@ __all__ = [
     'T5Decoder',
     'T5EncoderModel',
     'HuggingfaceTokenizer',
+    'TempoControl',
 ]

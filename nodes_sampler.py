@@ -145,6 +145,9 @@ class WanVideoSampler:
                 "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
                 "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
                 "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
+                "tempocontrol_args": ("TEMPOCONTROLARGS", {
+                    "tooltip": "TempoControl arguments for temporal object appearance control"
+                }),
             }
         }
 
@@ -156,7 +159,7 @@ class WanVideoSampler:
     def process(self, model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index, text_embeds=None,
         force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
         cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
-        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
+        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False, tempocontrol_args=None):
 
         patcher = model
         model = model.model
@@ -567,6 +570,100 @@ class WanVideoSampler:
             has_ref = image_cond is not None or has_ref
 
         latent_video_length = noise.shape[1]
+
+        # ============================================
+        # ADD THIS SECTION AFTER THE TOKENIZER SETUP
+        # ============================================
+
+        # TempoControl setup
+        tempocontrol_enabled = False
+        tempocontrol_token_indices = []
+        tempocontrol_signals = []
+        tempocontrol_start_percent = 0.0
+        tempocontrol_end_percent = 1.0
+
+        if tempocontrol_args is not None:
+            from transformers import T5Tokenizer
+
+            log.info("Setting up TempoControl...")
+
+            # Load tokenizer
+            tokenizer = tempocontrol_args["tokenizer"]
+            if tokenizer is None:
+                log.info(f"Loaded tokenizer fail: {tokenizer}")
+
+            # Get parameters
+            prompt = tempocontrol_args["prompt"]
+            target_objects = tempocontrol_args["target_objects"]
+            control_signals = tempocontrol_args["control_signals"]
+            tempocontrol_start_percent = tempocontrol_args.get("start_percent", 0.0)
+            tempocontrol_end_percent = tempocontrol_args.get("end_percent", 1.0)
+            learning_rate = tempocontrol_args.get("learning_rate", 20.0)
+            max_iterations = tempocontrol_args.get("max_iterations", 10)
+
+            # Find token indices for each target object
+            tokens = tokenizer(prompt, add_special_tokens=True)
+            log.info(f"Tokenizing prompt for TempoControl...{tokens.shape}")
+            token_strings = tokenizer.tokenizer.convert_ids_to_tokens(tokens.reshape(-1).tolist())
+
+            log.info(f"Prompt tokens: {token_strings}")
+
+            for target_obj in target_objects:
+                found_indices = []
+                for idx, token_str in enumerate(token_strings):
+                    clean_token = token_str.replace("▁", "").replace("</s>", "").replace("<pad>", "").lower()
+                    if target_obj.lower() in clean_token:
+                        found_indices.append(idx)
+
+                if not found_indices:
+                    log.warning(f"Target object '{target_obj}' not found in tokenized prompt. Skipping.")
+                    continue
+
+                log.info(f"Found '{target_obj}' at token indices: {found_indices}")
+                tempocontrol_token_indices.extend(found_indices)
+
+            if tempocontrol_token_indices:
+                # Validate control signals
+                expected_frames = latent_video_length
+                tempocontrol_signals = []
+
+                for i, signal in enumerate(control_signals):
+                    if not isinstance(signal, torch.Tensor):
+                        signal = torch.tensor(signal, dtype=torch.float32)
+
+                    if len(signal) != expected_frames:
+                        log.warning(
+                            f"Control signal {i} has {len(signal)} frames, expected {expected_frames}. Resizing...")
+
+                        # Ensure signal is 1D
+                        if signal.dim() > 1:
+                            signal = signal.squeeze()
+
+                        # Resize using 1D interpolation
+                        signal_resized = torch.nn.functional.interpolate(
+                            signal.unsqueeze(0).unsqueeze(0),  # [1, 1, T]
+                            size=(expected_frames,),  # Target size as tuple
+                            mode='linear',
+                            align_corners=False
+                        ).squeeze()  # [T]
+
+                        signal = signal_resized
+                        log.info(f"Resized control signal {i} to {expected_frames} frames")
+
+                    # Move to device
+                    tempocontrol_signals.append(signal.to(device))
+                tempocontrol_enabled = True
+
+                log.info(
+                    f"TempoControl enabled with {len(tempocontrol_token_indices)} token indices and {len(tempocontrol_signals)} control signals")
+                log.info(
+                    f"TempoControl will be active from {tempocontrol_start_percent * 100:.1f}% to {tempocontrol_end_percent * 100:.1f}% of sampling")
+            else:
+                log.warning("No valid token indices found. TempoControl disabled.")
+
+        # ============================================
+        # END OF TEMPOCONTROL SETUP
+        # ============================================
 
         # Initialize FreeInit filter if enabled
         freq_filter = None
@@ -1691,6 +1788,26 @@ class WanVideoSampler:
         current_latent = latent
         initial_noise_saved = None
 
+        # ============================================
+        # ADD THIS SECTION BEFORE THE MAIN SAMPLING LOOP
+        # (After "# Main sampling loop with FreeInit iterations")
+        # ============================================
+
+        # Enable TempoControl on the transformer
+        if tempocontrol_enabled:
+            try:
+                transformer.enable_tempocontrol(
+                    token_indices=tempocontrol_token_indices,
+                    control_signals=tempocontrol_signals,
+                    learning_rate=learning_rate,
+                    max_iterations=max_iterations,
+                    start_step=int(tempocontrol_start_percent * steps),
+                    end_step=int(tempocontrol_end_percent * steps)
+                )
+            except Exception as e:
+                log.warning(f"Failed to enable TempoControl: {e}")
+                tempocontrol_enabled = False
+
         for iter_idx in range(iterations):
 
             # FreeInit noise reinitialization (after first iteration)
@@ -1749,6 +1866,28 @@ class WanVideoSampler:
                     if flowedit_args is not None:
                         if idx < skip_steps:
                             continue
+
+                    # ADD THIS: Check if TempoControl should be active at this step
+                    current_step_percentage = idx / len(timesteps)
+
+                    if tempocontrol_enabled:
+                        should_be_active = (
+                                    tempocontrol_start_percent <= current_step_percentage <= tempocontrol_end_percent)
+
+                        # Toggle TempoControl based on current step
+                        if should_be_active and not tempocontrol_enabled:
+                            log.info(f"Activating TempoControl at step {idx} ({current_step_percentage * 100:.1f}%)")
+                            transformer.enable_tempocontrol(
+                                token_indices=tempocontrol_token_indices,
+                                control_signals=tempocontrol_signals,
+                                learning_rate=learning_rate,
+                                max_iterations=max_iterations,
+                                start_step=int(tempocontrol_start_percent * steps),
+                                end_step=int(tempocontrol_end_percent * steps)
+                            )
+                        elif not should_be_active and tempocontrol_enabled:
+                            log.info(f"Deactivating TempoControl at step {idx} ({current_step_percentage * 100:.1f}%)")
+                            transformer.disable_tempocontrol()
 
                     if bidirectional_sampling:
                         latent_flipped = torch.flip(latent, dims=[1])
@@ -3133,6 +3272,12 @@ class WanVideoSampler:
                     if not model["auto_cpu_offload"]:
                         offload_transformer(transformer)
                 raise e
+            finally:
+                # Disable TempoControl after sampling
+                if tempocontrol_enabled and hasattr(transformer,
+                                                    'tempocontrol_enabled') and transformer.tempocontrol_enabled:
+                    log.info("Disabling TempoControl...")
+                    transformer.disable_tempocontrol()
 
         if phantom_latents is not None:
             latent = latent[:,:-phantom_latents.shape[1]]

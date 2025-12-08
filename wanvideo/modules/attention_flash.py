@@ -19,11 +19,24 @@ except Exception as e:
 if not FLASH_ATTN_2_AVAILABLE and not FLASH_ATTN_3_AVAILABLE:
     flash_attention = attention_func_error
 else:
-    def flash_attention(q, k, v, q_lens=None, k_lens=None, dropout_p=0., softmax_scale=None, q_scale=None, causal=False, window_size=(-1, -1), deterministic=False, dtype=torch.bfloat16, version=None):
+    def flash_attention(q, k, v,
+                        q_lens=None,
+                        k_lens=None,
+                        dropout_p=0.,
+                        softmax_scale=None,
+                        q_scale=None,
+                        causal=False,
+                        window_size=(-1, -1),
+                        deterministic=False,
+                        dtype=torch.bfloat16,
+                        version=None,
+                        return_attn=False,):
         half_dtypes = (torch.float16, torch.bfloat16)
 
         # params
         b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+        nheads = q.size(2)
+        head_dim = q.size(3)
 
         def half(x):
             return x if x.dtype in half_dtypes else x.to(dtype)
@@ -51,6 +64,25 @@ else:
         q = q.to(v.dtype)
         k = k.to(v.dtype)
 
+        if return_attn:
+            try:
+                # Reshape q, k for manual computation
+                q_reshaped = q.view(b, lq, nheads, head_dim)  # [B, Lq, Nq, C1]
+                k_reshaped = k.view(b, lk, nheads, head_dim)  # [B, Lk, Nk, C1]
+
+                # Compute QK^T / sqrt(d)
+                scale = 1.0 / (head_dim ** 0.5) if softmax_scale is None else softmax_scale
+                attn_scores = torch.einsum('bqhd,bkhd->bhqk', q_reshaped, k_reshaped) * scale  # * 2
+                # Apply causal mask if needed
+                if causal:
+                    mask = torch.triu(torch.ones(lq, lk, device=q.device), diagonal=1).bool()
+                    attn_scores = attn_scores.masked_fill(mask[None, None, :, :], float('-inf'))
+
+                # Compute softmax
+                attn = torch.nn.functional.softmax(attn_scores, dim=-1)  # .detach()  # [B, Nq, Lq, Lk]
+            except Exception as e:
+                raise Exception(f"Error computing manual attention map: {e}")
+
         if q_scale is not None:
             q = q * q_scale
 
@@ -77,4 +109,8 @@ else:
                 max_seqlen_q=lq, max_seqlen_k=lk, dropout_p=dropout_p,
                 softmax_scale=softmax_scale, causal=causal, window_size=window_size,
                 deterministic=deterministic).unflatten(0, (b, lq))
-        return x.type(out_dtype)
+
+        if return_attn:
+            return x.type(out_dtype), attn
+        else:
+            return x.type(out_dtype)
